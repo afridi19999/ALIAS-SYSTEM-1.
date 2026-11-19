@@ -76,6 +76,7 @@ export class ThreadService {
     clientName?: string;
     clientEmail?: string;
     businessName?: string;
+    threadType?: "intake" | "direct";
   }): Promise<IAdminClientThread> {
     await dbConnect();
     const campaignIdObj = new mongoose.Types.ObjectId(params.campaignId.toString());
@@ -101,6 +102,10 @@ export class ThreadService {
         thread.businessName = params.businessName;
         needsSave = true;
       }
+      if (params.threadType && thread.threadType !== params.threadType) {
+        thread.threadType = params.threadType;
+        needsSave = true;
+      }
       if (needsSave) {
         await thread.save();
       }
@@ -115,6 +120,7 @@ export class ThreadService {
         clientName: params.clientName || "",
         clientEmail: params.clientEmail || "",
         businessName: params.businessName || "",
+        threadType: params.threadType || "intake",
         threadGeneration: 1,
         unreadAdminCount: 0,
         unreadClientCount: 0,
@@ -548,6 +554,7 @@ export class ThreadService {
       clientName,
       clientEmail,
       businessName,
+      threadType: "intake",
     });
 
     const MessageModel = mongoose.models.Message || (await import("@/models/Message")).default;

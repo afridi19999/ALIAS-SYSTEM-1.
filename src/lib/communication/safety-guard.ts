@@ -32,6 +32,13 @@ export class CommunicationSafetyGuard {
     /\b(?:contractual\s+obligation|legal\s+warranty|indemnif)/i,
   ];
 
+  private static readonly PLACEHOLDER_PATTERNS = [
+    /\bdemo\s+client\b/i,
+    /\bnew\s+marketing\s+campaign\b/i,
+    /\buntitled\s+campaign\b/i,
+    /\bclient@example\.com\b/i,
+  ];
+
   /**
    * 3-Layer Conservative Safety Evaluation
    */
@@ -86,6 +93,14 @@ export class CommunicationSafetyGuard {
       if (pattern.test(text)) {
         flags.push("LEGAL_OR_WARRANTY_LIABILITY");
         reasons.push("Contains formal legal guarantees, warranties, or liability promises.");
+        break;
+      }
+    }
+
+    for (const pattern of this.PLACEHOLDER_PATTERNS) {
+      if (pattern.test(text)) {
+        flags.push("CONTAINS_PLACEHOLDER");
+        reasons.push("Contains placeholder values such as Demo Client or New Marketing Campaign.");
         break;
       }
     }

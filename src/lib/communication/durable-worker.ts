@@ -304,7 +304,7 @@ export class DurableCommunicationWorker {
         clientMessage: message.content,
         clientName: thread.clientName,
         businessName: thread.businessName,
-        recentMessages: recentMessages.reverse().map((m) => ({
+        recentMessages: [...recentMessages].reverse().map((m) => ({
           sender: m.sender,
           content: m.content,
         })),
@@ -381,9 +381,27 @@ export class DurableCommunicationWorker {
           settings = created;
         }
 
+        // Check real identity vs placeholder values
+        const isPlaceholderClient =
+          !currentThread.clientName ||
+          currentThread.clientName.trim().length === 0 ||
+          currentThread.clientName.trim().toLowerCase() === "demo client" ||
+          currentThread.clientName.trim().toLowerCase() === "client";
+
+        const isPlaceholderCampaign =
+          !currentThread.businessName ||
+          currentThread.businessName.trim().length === 0 ||
+          currentThread.businessName.trim().toLowerCase() === "new marketing campaign" ||
+          currentThread.businessName.trim().toLowerCase() === "untitled campaign" ||
+          currentThread.businessName.trim().toLowerCase() === "client campaign";
+
+        const hasRealIdentity = !isPlaceholderClient && !isPlaceholderCampaign;
+
         // Eligibility criteria for scheduling autonomous auto-reply:
-        // Must be explicitly enabled globally AND messaging not shut off AND thread not admin controlled
+        // Must be non-intake thread AND have real identity AND auto-reply enabled globally AND messaging not shut off AND thread not admin controlled
         const isEligible =
+          currentThread.threadType !== "intake" &&
+          hasRealIdentity &&
           settings.autoReplyGlobalEnabled === true &&
           currentCommState.effectiveMode !== "MESSAGING_OFF" &&
           !currentThread.adminControlled &&
@@ -559,8 +577,23 @@ export class DurableCommunicationWorker {
           return false;
         }
 
-        // 1b. Check if thread was taken over by Admin
+        // 1b. Check if thread is intake, taken over by Admin, or missing real identity
         const currentThreadCheck = await AdminClientThread.findById(job.threadId, null, sessionOpt);
+        if (currentThreadCheck?.threadType === "intake") {
+          await AdminAutoReplyJob.findOneAndUpdate(
+            { _id: job._id, status: "PROCESSING", claimToken },
+            {
+              $set: {
+                status: "CANCELLED",
+                cancelledReason: "INTAKE_THREAD_EXCLUDED",
+                completedAt: new Date(),
+              },
+            },
+            sessionOpt
+          );
+          return false;
+        }
+
         if (currentThreadCheck?.adminControlled || currentThreadCheck?.aiAutoReplyAllowed === false) {
           await AdminAutoReplyJob.findOneAndUpdate(
             { _id: job._id, status: "PROCESSING", claimToken },
@@ -568,6 +601,37 @@ export class DurableCommunicationWorker {
               $set: {
                 status: "CANCELLED",
                 cancelledReason: "ADMIN_CONTROLLED_TAKEOVER",
+                completedAt: new Date(),
+              },
+            },
+            sessionOpt
+          );
+          return false;
+        }
+
+        // 1c. Safety check on proposed reply and placeholder values
+        const textSafety = CommunicationSafetyGuard.evaluate(job.proposedReply);
+        const isPlaceholderClient =
+          !currentThreadCheck?.clientName ||
+          currentThreadCheck.clientName.trim().length === 0 ||
+          currentThreadCheck.clientName.trim().toLowerCase() === "demo client" ||
+          currentThreadCheck.clientName.trim().toLowerCase() === "client";
+        const isPlaceholderCampaign =
+          !currentThreadCheck?.businessName ||
+          currentThreadCheck.businessName.trim().length === 0 ||
+          currentThreadCheck.businessName.trim().toLowerCase() === "new marketing campaign" ||
+          currentThreadCheck.businessName.trim().toLowerCase() === "untitled campaign" ||
+          currentThreadCheck.businessName.trim().toLowerCase() === "client campaign";
+
+        if (!textSafety.passed || isPlaceholderClient || isPlaceholderCampaign) {
+          await AdminAutoReplyJob.findOneAndUpdate(
+            { _id: job._id, status: "PROCESSING", claimToken },
+            {
+              $set: {
+                status: "CANCELLED",
+                cancelledReason: !textSafety.passed
+                  ? `SAFETY_FAILED: ${textSafety.flags.join(", ")}`
+                  : "MISSING_REAL_CLIENT_OR_CAMPAIGN_IDENTITY",
                 completedAt: new Date(),
               },
             },
@@ -662,7 +726,12 @@ export class DurableCommunicationWorker {
         );
 
         // 5b. Mirror outgoing auto-reply to client intake chat (Message model)
-        if (updatedThread.campaignId && mongoose.connection.readyState === 1) {
+        // Strictly exclude intake threads to ensure intake chat only receives responses from the intake bot!
+        if (
+          updatedThread.threadType !== "intake" &&
+          updatedThread.campaignId &&
+          mongoose.connection.readyState === 1
+        ) {
           try {
             const MessageModel = mongoose.models.Message || (await import("@/models/Message")).default;
             const ConversationModel = mongoose.models.Conversation || (await import("@/models/Conversation")).default;
@@ -822,11 +891,30 @@ export class DurableCommunicationWorker {
       const thread = await AdminClientThread.findById(threadIdObj);
       if (
         thread &&
+        thread.threadType !== "intake" &&
         !thread.adminControlled &&
         thread.perThreadAiEnabled !== false &&
         thread.aiAutoReplyAllowed !== false &&
         thread.lastSender === "client"
       ) {
+        // Recovery loop must never schedule auto-reply for placeholder identities
+        const isPlaceholderClient =
+          !thread.clientName ||
+          thread.clientName.trim().length === 0 ||
+          thread.clientName.trim().toLowerCase() === "demo client" ||
+          thread.clientName.trim().toLowerCase() === "client";
+
+        const isPlaceholderCampaign =
+          !thread.businessName ||
+          thread.businessName.trim().length === 0 ||
+          thread.businessName.trim().toLowerCase() === "new marketing campaign" ||
+          thread.businessName.trim().toLowerCase() === "untitled campaign" ||
+          thread.businessName.trim().toLowerCase() === "client campaign";
+
+        if (isPlaceholderClient || isPlaceholderCampaign) {
+          return;
+        }
+
         const { PresenceService } = await import("@/lib/communication/presence-service");
         const freshState = await PresenceService.getState();
         if (
@@ -848,6 +936,10 @@ export class DurableCommunicationWorker {
             const proposedReply = lastMsg.aiAnalysis.suggestions[tone] || lastMsg.aiAnalysis.suggestions.professional;
 
             if (proposedReply) {
+              const textSafety = CommunicationSafetyGuard.evaluate(proposedReply);
+              if (!textSafety.passed) {
+                return;
+              }
               const countdownSec = freshState.settings.countdownDurationSeconds || 10;
               const scheduledExecuteAt = new Date(Date.now() + countdownSec * 1000);
 

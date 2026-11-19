@@ -101,7 +101,14 @@ export class AdminCommunicationAgent {
     businessName: string,
     artifact1?: any
   ): IndustryProfile {
-    const combined = `${businessName || ""} ${rawText || ""} ${artifact1?.client?.industry || ""} ${artifact1?.product_service?.name || ""} ${artifact1?.product_service?.category || ""}`.toLowerCase();
+    const cleanBusinessName =
+      businessName &&
+      !businessName.toLowerCase().includes("new marketing campaign") &&
+      !businessName.toLowerCase().includes("untitled campaign") &&
+      !businessName.toLowerCase().includes("client campaign")
+        ? businessName
+        : "";
+    const combined = `${cleanBusinessName} ${rawText || ""} ${artifact1?.client?.industry || ""} ${artifact1?.product_service?.name || ""} ${artifact1?.product_service?.category || ""}`.toLowerCase();
 
     // 1. B2B SaaS
     if (
@@ -369,25 +376,71 @@ export class AdminCommunicationAgent {
   private static classifyClientMessage(
     rawInquiry: string,
     businessName: string,
-    artifact1?: any
+    artifact1?: any,
+    recentMessages?: { sender: string; content: string }[]
   ): ClientIntentAnalysis {
     const text = rawInquiry.trim();
     const lower = text.toLowerCase();
 
-    // Extract brand name from message or parameters
+    // Extract brand name from current message or recent thread messages first (thread-scoped priority)
     let extractedBrand = "";
-    if (businessName && businessName.trim() && !businessName.toLowerCase().includes("new marketing campaign")) {
-      extractedBrand = businessName.trim();
+
+    const brandRegex = /(?:my\s+)?(?:company|brand|business)(?:\s+name)?\s*(?:is|:)\s*([a-zA-Z0-9_\- ]+?)(?:\s+and|\s+our|\s+with|[.,\n]|$)/i;
+    const directBrandMatch = text.match(brandRegex);
+    if (directBrandMatch && directBrandMatch[1]) {
+      extractedBrand = directBrandMatch[1].trim();
     } else if (text.includes("(") && text.includes(")")) {
       const match = text.match(/^([^(]+)\(([^)]+)\)/);
       if (match) extractedBrand = match[1].trim();
     }
+
+    // Check recent thread messages if not found in current message
+    if (!extractedBrand && recentMessages && recentMessages.length > 0) {
+      for (const m of [...recentMessages].reverse()) {
+        if (m.sender === "client" || m.sender === "user") {
+          const mMatch = m.content.match(brandRegex);
+          if (mMatch && mMatch[1]) {
+            extractedBrand = mMatch[1].trim();
+            break;
+          }
+          if (m.content.includes("(") && m.content.includes(")")) {
+            const parenMatch = m.content.match(/^([^(]+)\(([^)]+)\)/);
+            if (parenMatch) {
+              extractedBrand = parenMatch[1].trim();
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (
+      !extractedBrand &&
+      businessName &&
+      businessName.trim() &&
+      !businessName.toLowerCase().includes("new marketing campaign") &&
+      !businessName.toLowerCase().includes("untitled campaign") &&
+      !businessName.toLowerCase().includes("client campaign")
+    ) {
+      extractedBrand = businessName.trim();
+    }
+
+    // Only fallback to artifact1 if its brand matches or no brand was detected in thread
     if (!extractedBrand && artifact1?.client?.company_name) {
       extractedBrand = artifact1.client.company_name.trim();
     }
 
+    // Context Isolation: If current thread identified a specific brand that contradicts artifact1,
+    // do not bleed stale artifact1 details (like UrbanThread) into this thread's profile
+    const isStaleArtifact = Boolean(
+      extractedBrand &&
+        artifact1?.client?.company_name &&
+        artifact1.client.company_name.toLowerCase() !== extractedBrand.toLowerCase()
+    );
+    const validArtifact1 = isStaleArtifact ? null : artifact1;
+
     // Extract product category
-    let extractedProduct = artifact1?.product_service?.name?.trim() || "";
+    let extractedProduct = validArtifact1?.product_service?.name?.trim() || "";
     if (!extractedProduct && text.includes("(") && text.includes(")")) {
       const match = text.match(/\(([^)]+)\)/);
       if (match) extractedProduct = match[1].trim();
@@ -408,7 +461,7 @@ export class AdminCommunicationAgent {
       extractedAudience = "nationwide delivery across Bangladesh";
     }
 
-    const industryProfile = this.inferIndustryProfile(text, businessName, artifact1);
+    const industryProfile = this.inferIndustryProfile(text, businessName, validArtifact1);
 
     const buildResult = (
       category: ClientMessageCategory,
@@ -700,12 +753,25 @@ export class AdminCommunicationAgent {
     } = params;
 
     const rawInquiry = (clientMessage || "").trim();
-    const clientGreeting = clientName ? clientName.trim() : "there";
+    const isPlaceholderClient =
+      !clientName ||
+      clientName.trim().length === 0 ||
+      clientName.trim().toLowerCase() === "demo client" ||
+      clientName.trim().toLowerCase() === "client";
+    const clientGreeting = isPlaceholderClient ? "there" : clientName.trim();
 
     // 1. Classify client intent across 17 categories and infer industry commercial profile
-    const intent = this.classifyClientMessage(rawInquiry, businessName, artifact1);
+    const intent = this.classifyClientMessage(rawInquiry, businessName, artifact1, recentMessages);
     const profile = intent.industryProfile;
-    const brandName = intent.extractedBrand || businessName || "your brand";
+
+    const isPlaceholderCampaign =
+      !businessName ||
+      businessName.trim().length === 0 ||
+      businessName.trim().toLowerCase().includes("new marketing campaign") ||
+      businessName.trim().toLowerCase().includes("untitled campaign") ||
+      businessName.trim().toLowerCase() === "client campaign";
+
+    const brandName = intent.extractedBrand || (!isPlaceholderCampaign ? businessName.trim() : "your brand");
     const productName = intent.extractedProduct || artifact1?.product_service?.name?.trim() || "";
     const objectiveStr = artifact1?.campaign?.objective || "drive measurable revenue and brand equity";
 
@@ -885,6 +951,18 @@ export class AdminCommunicationAgent {
     const matchedScriptTitles = scriptMatch.matchedScripts.map((s) => s.title);
     const scriptVersion = scriptMatch.bestMatch?.version || 1;
 
+    const sanitizeSuggestion = (text: string): string => {
+      return text
+        .replace(/\bdemo\s+client\b/gi, "there")
+        .replace(/\bnew\s+marketing\s+campaign\b/gi, "your brand")
+        .replace(/\buntitled\s+campaign\b/gi, "your brand")
+        .replace(/\bclient\s+campaign\b/gi, "your brand");
+    };
+
+    fallbackProfessional = sanitizeSuggestion(fallbackProfessional);
+    fallbackFriendly = sanitizeSuggestion(fallbackFriendly);
+    fallbackDetailed = sanitizeSuggestion(fallbackDetailed);
+
     const fallbackResponse: GeneratedCommunicationSuggestions = {
       suggestions: {
         professional: fallbackProfessional,
@@ -1041,9 +1119,9 @@ ${JSON.stringify(promptContext, null, 2)}`;
 
         if (parsed.suggestions?.professional && parsed.suggestions?.friendly && parsed.suggestions?.detailed) {
           const suggestions = {
-            professional: parsed.suggestions.professional,
-            friendly: parsed.suggestions.friendly,
-            detailed: parsed.suggestions.detailed,
+            professional: sanitizeSuggestion(parsed.suggestions.professional),
+            friendly: sanitizeSuggestion(parsed.suggestions.friendly),
+            detailed: sanitizeSuggestion(parsed.suggestions.detailed),
           };
 
           const recommendedTone = (["professional", "friendly", "detailed"].includes(parsed.recommendedTone)

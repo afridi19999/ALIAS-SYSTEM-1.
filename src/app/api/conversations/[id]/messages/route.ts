@@ -198,6 +198,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const cleanBrand = extractedBrandName.trim();
       if (isDefaultName || cleanBrand.toLowerCase() !== currentCampaignName.toLowerCase()) {
         await Repository.updateCampaignName(campaignId, cleanBrand);
+        try {
+          const AdminClientThread = (await import("@/models/AdminClientThread")).default;
+          await AdminClientThread.updateMany(
+            { campaignId },
+            { $set: { businessName: cleanBrand } }
+          );
+        } catch (tErr) {
+          console.warn("[API/Messages] Thread businessName update warning:", tErr);
+        }
       }
     }
 

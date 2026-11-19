@@ -551,10 +551,22 @@ function processDemoConversation(
   const hasAudienceLoc = Boolean(currentArtifact?.target_audience?.location && currentArtifact.target_audience.location.trim().length > 0);
 
   const isAudienceTurn = wasAskingAudience || (!wasAskingObjective && !hasAudienceDesc);
-  const ageMatch = userMessage.match(/([0-9]{2})\s*(?:to|-)\s*([0-9]{2})/);
+  const ageMatch =
+    userMessage.match(/\b([0-9]{1,2})\s*(?:to|-)\s*([0-9]{1,2})\s*(?:years?|yrs?|yr)?\s*(?:old|mans?|men|women|boys?|girls?|kids?|people)?/i) ||
+    userMessage.match(/\b([0-9]{1,2})\s*(?:to|-)\s*([0-9]{1,2})\b/);
+
   if (!hasAudienceAge && ageMatch) {
     updates.target_audience = updates.target_audience || {};
     updates.target_audience.age_range = `${ageMatch[1]}-${ageMatch[2]}`;
+    if (!hasAudienceDesc && !updates.target_audience.description) {
+      if (msgLower.includes("mans") || msgLower.includes("men") || msgLower.includes("male")) {
+        updates.target_audience.description = `Men aged ${ageMatch[1]}-${ageMatch[2]}`;
+      } else if (msgLower.includes("women") || msgLower.includes("female")) {
+        updates.target_audience.description = `Women aged ${ageMatch[1]}-${ageMatch[2]}`;
+      } else if (msgLower.includes("kids") || msgLower.includes("children")) {
+        updates.target_audience.description = `Kids aged ${ageMatch[1]}-${ageMatch[2]}`;
+      }
+    }
   } else if (!hasAudienceDesc && (msgLower.includes("young") || msgLower.includes("students") || msgLower.includes("youth") || msgLower.includes("gen z"))) {
     updates.target_audience = updates.target_audience || {};
     updates.target_audience.description = "Young people / Students / Gen Z";
@@ -726,23 +738,68 @@ function processDemoConversation(
   // 9. Timeline Extraction (Handles "2 months", "1 month", "2 weeks", "seasonal", etc.)
   const hasTimeline = Boolean(currentArtifact?.timeline?.duration && currentArtifact.timeline.duration.trim().length > 0);
   const allowTimelineUpdate = !hasTimeline || isTimelineCorrection;
-  const durationUnitMatch = userMessage.match(/(\d+)\s*(months?|weeks?|days?|years?|mo|wks?)/i);
-  const wordNumberMatch = userMessage.match(/\b(one|two|three|four|five|six|seven|eight|a|couple of|few)\s+(months?|weeks?|days?)\b/i);
 
-  if (allowTimelineUpdate) {
+  // Detect whether numeric year/time expressions are part of an audience age description or age range
+  const isAudienceAgeExpression = Boolean(
+    userMessage.match(/\b\d{1,2}\s*(?:to|-)\s*\d{1,2}\s*(?:years?|yrs?|yr)?/i) ||
+    userMessage.match(/\b\d+\s*(?:years?|yrs?|yr)\s*(?:old|of age|mans?|men|women|boys?|girls?|kids?|people)\b/i) ||
+    (msgLower.includes("audience") && (msgLower.includes("year") || msgLower.includes("age"))) ||
+    msgLower.includes("years old") ||
+    msgLower.includes("year old")
+  );
+
+  // Clearly refers to campaign length criteria:
+  // Must either be answering an explicit timeline question (wasAskingTimeline / isTimelineCorrection),
+  // OR use explicit campaign length phrasing (e.g. "campaign duration", "run for 2 weeks", "planned for 3 months").
+  const hasExplicitTimelinePhrase = Boolean(
+    msgLower.includes("campaign duration") ||
+    msgLower.includes("duration of") ||
+    msgLower.includes("run for") ||
+    msgLower.includes("running for") ||
+    msgLower.includes("last for") ||
+    msgLower.includes("lasts for") ||
+    msgLower.includes("timeline is") ||
+    msgLower.includes("timeline:") ||
+    msgLower.includes("duration:") ||
+    msgLower.includes("flight:") ||
+    msgLower.includes("planned for") ||
+    msgLower.includes("scheduled for") ||
+    msgLower.includes("campaign length") ||
+    /\b(\d+)\s*(months?|weeks?|days?)\s*(?:long|campaign|duration|run|flight)\b/i.test(userMessage) ||
+    /\bfor\s+(\d+)\s*(months?|weeks?|days?)\b/i.test(userMessage)
+  );
+
+  const refersClearlyToCampaignLength =
+    (wasAskingTimeline || isTimelineCorrection || hasExplicitTimelinePhrase) &&
+    !isAudienceAgeExpression &&
+    !isProductPricing;
+
+  const durationUnitMatch = refersClearlyToCampaignLength
+    ? userMessage.match(/(\d+)\s*(months?|weeks?|days?|years?|mo|wks?)/i)
+    : null;
+  const wordNumberMatch = refersClearlyToCampaignLength
+    ? userMessage.match(/\b(one|two|three|four|five|six|seven|eight|a|couple of|few)\s+(months?|weeks?|days?)\b/i)
+    : null;
+
+  if (allowTimelineUpdate && refersClearlyToCampaignLength) {
     if (durationUnitMatch) {
       const count = durationUnitMatch[1];
+      const countNum = parseInt(count, 10);
       const unitRaw = durationUnitMatch[2].toLowerCase();
-      const formattedUnit = unitRaw.startsWith("m")
-        ? count === "1" ? "Month" : "Months"
-        : unitRaw.startsWith("w")
-        ? count === "1" ? "Week" : "Weeks"
-        : unitRaw.startsWith("d")
-        ? count === "1" ? "Day" : "Days"
-        : count === "1" ? "Year" : "Years";
-      updates.timeline = updates.timeline || {};
-      updates.timeline.duration = `${count} ${formattedUnit}`;
-      acknowledgements.push(hasTimeline && isTimelineCorrection ? `Timeline updated to ${updates.timeline.duration}.` : `Duration set to ${updates.timeline.duration}.`);
+      // Guard against impossible campaign lengths (e.g. > 3 years) unless explicitly specified as a multi-year campaign
+      const isExcessiveYearDuration = unitRaw.startsWith("y") && countNum > 3 && !msgLower.includes("campaign duration");
+      if (!isExcessiveYearDuration) {
+        const formattedUnit = unitRaw.startsWith("m")
+          ? count === "1" ? "Month" : "Months"
+          : unitRaw.startsWith("w")
+          ? count === "1" ? "Week" : "Weeks"
+          : unitRaw.startsWith("d")
+          ? count === "1" ? "Day" : "Days"
+          : count === "1" ? "Year" : "Years";
+        updates.timeline = updates.timeline || {};
+        updates.timeline.duration = `${count} ${formattedUnit}`;
+        acknowledgements.push(hasTimeline && isTimelineCorrection ? `Timeline updated to ${updates.timeline.duration}.` : `Duration set to ${updates.timeline.duration}.`);
+      }
     } else if (wordNumberMatch) {
       const wordMap: Record<string, string> = {
         one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", a: "1", "couple of": "2", few: "3"
