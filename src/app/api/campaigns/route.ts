@@ -19,6 +19,20 @@ export async function POST(req: Request) {
     // Create campaign and conversation
     const result = await Repository.createCampaign(name, clientId);
 
+    // Initialize Admin Communication Thread for real-time admin visibility
+    try {
+      const { ThreadService } = await import("@/lib/communication/thread-service");
+      await ThreadService.findOrCreateThread({
+        campaignId: result.campaignId,
+        clientId,
+        clientName: client.name || "Demo Client",
+        clientEmail: client.email || "client@example.com",
+        businessName: name,
+      });
+    } catch (tErr) {
+      console.warn("[API/Campaigns] Non-blocking thread init warning:", tErr);
+    }
+
     const storageMode = await Repository.getStorageMode();
 
     return NextResponse.json({
@@ -29,9 +43,10 @@ export async function POST(req: Request) {
     });
   } catch (error: any) {
     console.error("[API/Campaigns] Error creating campaign:", error);
+    const status = error.statusCode || (error.name === "DatabaseConnectionError" ? 503 : 500);
     return NextResponse.json(
       { error: "Failed to create campaign", details: error.message || "Unknown error" },
-      { status: 500 }
+      { status }
     );
   }
 }

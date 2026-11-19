@@ -2,10 +2,9 @@
 
 import { useEffect, useState } from "react";
 import ChatInterface from "@/components/chat/ChatInterface";
-import LiveArtifactPreview from "@/components/campaign/LiveArtifactPreview";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { FileText, ArrowLeft, X, ShieldCheck, AlertCircle, Loader2 } from "lucide-react";
+import { ArrowLeft, AlertCircle, Loader2 } from "lucide-react";
 import Link from "next/link";
 
 export default function CampaignPage() {
@@ -15,7 +14,6 @@ export default function CampaignPage() {
   const campaignId = rawId ? rawId.replace(/^[./\\]+|[./\\;,:]+$/g, "") : "";
 
   const [artifact, setArtifact] = useState<any>(null);
-  const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [isVerifying, setIsVerifying] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
@@ -76,19 +74,6 @@ export default function CampaignPage() {
       isMounted = false;
     };
   }, [campaignId]);
-
-  // Count captured fields for review button badge
-  let capturedCount = 0;
-  if (artifact) {
-    if (artifact.client?.company_name) capturedCount++;
-    if (artifact.client?.industry) capturedCount++;
-    if (artifact.product_service?.name) capturedCount++;
-    if (artifact.product_service?.type) capturedCount++;
-    if (artifact.campaign?.objective) capturedCount++;
-    if (artifact.target_audience?.location || artifact.target_audience?.description) capturedCount++;
-    if (artifact.budget?.amount || artifact.budget?.type === "unknown") capturedCount++;
-    if (artifact.timeline?.duration) capturedCount++;
-  }
 
   // Loading state when auto-redirecting /new. or /new
   if (!campaignId || campaignId.toLowerCase() === "new") {
@@ -186,23 +171,7 @@ export default function CampaignPage() {
             </div>
           </div>
 
-          {/* Action buttons: Review Extracted Facts */}
           <div className="flex items-center gap-2.5">
-            <Button
-              variant={showReviewPanel ? "default" : "outline"}
-              size="sm"
-              onClick={() => setShowReviewPanel(!showReviewPanel)}
-              className="text-xs font-medium h-8 px-3"
-            >
-              <FileText className="w-3.5 h-3.5 mr-1.5" />
-              {showReviewPanel ? "Close Review" : "Review Extracted Facts"}
-              {capturedCount > 0 && !showReviewPanel && (
-                <span className="ml-1.5 px-1.5 py-0.2 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
-                  {capturedCount}
-                </span>
-              )}
-            </Button>
-
             <Link href="/admin">
               <Button variant="ghost" size="sm" className="text-xs text-zinc-500 h-8 px-2.5">
                 Admin
@@ -221,30 +190,6 @@ export default function CampaignPage() {
           </div>
         </div>
       </div>
-
-      {/* Slide-over Review Panel (Only visible when user toggles "Review Extracted Facts") */}
-      {showReviewPanel && (
-        <aside className="w-96 md:w-[440px] flex flex-col bg-white dark:bg-zinc-900 border-l border-zinc-200 dark:border-zinc-800 shadow-xl z-20 animate-in slide-in-from-right duration-250 shrink-0">
-          <header className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between bg-zinc-50/70 dark:bg-zinc-900/60">
-            <div>
-              <h2 className="font-semibold text-sm text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-blue-600" /> Extracted Campaign Facts
-              </h2>
-              <p className="text-[11px] text-zinc-500">Review structured facts captured during conversation</p>
-            </div>
-            <button
-              onClick={() => setShowReviewPanel(false)}
-              className="p-1 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-800 transition-colors"
-              title="Close panel"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </header>
-          <div className="flex-1 overflow-y-auto p-5">
-            <LiveArtifactPreview artifact={artifact} campaignId={campaignId} />
-          </div>
-        </aside>
-      )}
     </div>
   );
 }

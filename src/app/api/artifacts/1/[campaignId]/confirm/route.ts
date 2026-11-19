@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { Repository } from "@/lib/db/repo";
+import { BriefAgent } from "@/lib/ai/brief-agent";
 
 export async function POST(req: Request, { params }: { params: Promise<{ campaignId: string }> }) {
   try {
@@ -33,11 +34,29 @@ export async function POST(req: Request, { params }: { params: Promise<{ campaig
     }
 
     const artifact = await Repository.confirmArtifact1(campaignId);
-    return NextResponse.json({ success: true, artifact });
+
+    // Fetch conversation history for high-fidelity context
+    const messages = await Repository.getMessages(campaignId);
+
+    // Phase 1: Generate both campaign documents directly without Research AI / Artifact-2
+    const docs = await BriefAgent.generateCampaignDocuments(existingArtifact, messages);
+
+    // Persist to campaign record
+    await Repository.saveCampaignDocuments(campaignId, {
+      masterBriefMarkdown: docs.master_campaign_brief_md,
+      executionScriptMarkdown: docs.campaign_execution_script_md,
+    });
+
+    return NextResponse.json({
+      success: true,
+      artifact,
+      documents: docs,
+      redirectTo: `/campaign/${campaignId}/brief`,
+    });
   } catch (error: any) {
     console.error("[API/Artifact1/Confirm] Error confirming artifact 1:", error);
     return NextResponse.json(
-      { error: "Failed to confirm artifact", details: error.message },
+      { error: "Failed to confirm artifact and generate campaign documents", details: error.message },
       { status: 500 }
     );
   }

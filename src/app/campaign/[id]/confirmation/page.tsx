@@ -70,7 +70,8 @@ export default function ConfirmationPage() {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || "Failed to confirm Artifact-1");
       }
-      router.push(`/campaign/${campaignId}/research`);
+      const data = await res.json();
+      router.push(data.redirectTo || `/campaign/${campaignId}/brief`);
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Failed to confirm artifact.");
@@ -94,12 +95,20 @@ export default function ConfirmationPage() {
       <div className="max-w-4xl w-full flex flex-col gap-8">
         {/* Navigation & Header */}
         <div className="flex flex-col gap-2">
-          <Link
-            href={`/campaign/${campaignId}`}
-            className="inline-flex items-center text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors w-fit mb-2"
-          >
-            <ArrowLeft className="w-3.5 h-3.5 mr-1" /> Back to conversation
-          </Link>
+          <div className="flex items-center justify-between mb-2">
+            <Link
+              href={`/campaign/${campaignId}`}
+              className="inline-flex items-center text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors w-fit"
+            >
+              <ArrowLeft className="w-3.5 h-3.5 mr-1" /> Back to conversation
+            </Link>
+            <Link
+              href={`/campaign/${campaignId}/messages`}
+              className="inline-flex items-center text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline transition-colors"
+            >
+              💬 Message Agency Admin
+            </Link>
+          </div>
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">
               Stage 3: Verification
@@ -327,7 +336,7 @@ export default function ConfirmationPage() {
           >
             {isConfirming ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Finalizing & Starting Research...
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Generating Master Brief & Execution Script...
               </>
             ) : !isComplete ? (
               <>
@@ -335,7 +344,7 @@ export default function ConfirmationPage() {
               </>
             ) : (
               <>
-                <CheckCircle2 className="w-4 h-4 mr-2" /> Confirm & Start Research{" "}
+                <CheckCircle2 className="w-4 h-4 mr-2" /> Confirm & Generate Campaign Documents{" "}
                 <Sparkles className="w-4 h-4 ml-1.5" />
               </>
             )}

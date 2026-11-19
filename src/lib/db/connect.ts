@@ -1,6 +1,14 @@
 import mongoose from "mongoose";
 
-const MONGODB_URI = process.env.MONGODB_URI;
+export class DatabaseConnectionError extends Error {
+  statusCode: number;
+  constructor(message: string, cause?: any) {
+    super(message);
+    this.name = "DatabaseConnectionError";
+    this.statusCode = 503;
+    if (cause) this.cause = cause;
+  }
+}
 
 interface MongooseCache {
   conn: typeof mongoose | null;
@@ -26,56 +34,94 @@ if (!global.mongooseCache) {
 }
 
 /**
- * Attempts connection to MongoDB with a short timeout.
- * If offline, caches the failure state for 60 seconds so operations execute at sub-millisecond speeds.
+ * Connects to MongoDB with robust Atlas replica set handling.
+ * Automatically recovers from transient connection blips and avoids aggressive lockouts.
  */
 export async function dbConnect(): Promise<typeof mongoose | null> {
-  if (cached.conn && mongoose.connection.readyState === 1) {
+  const allowMemoryFallback = process.env.ALLOW_MEMORY_FALLBACK !== "false";
+
+  // Fast-path: already connected
+  if (mongoose.connection.readyState === 1) {
+    cached.conn = mongoose;
     cached.isAvailable = true;
-    return cached.conn;
+    cached.lastFailureTime = null;
+    return mongoose;
   }
 
-  // If recently failed within the last 60 seconds, immediately return null to use fast fallback
+  // If a connection is actively in progress, await it
+  if (mongoose.connection.readyState === 2 && cached.promise) {
+    try {
+      const conn = await cached.promise;
+      if (conn && isMongoConnected()) {
+        cached.conn = conn;
+        cached.isAvailable = true;
+        cached.lastFailureTime = null;
+        return conn;
+      }
+    } catch {
+      cached.promise = null;
+    }
+  }
+
+  // Short 3-second cooldown to avoid tight spin-loops on complete network outage
   const now = Date.now();
-  if (cached.lastFailureTime && now - cached.lastFailureTime < 60000) {
+  if (cached.lastFailureTime && now - cached.lastFailureTime < 3000) {
+    if (!allowMemoryFallback) {
+      throw new DatabaseConnectionError(
+        "[Database] MongoDB connection is currently reconnecting. Please retry in a moment."
+      );
+    }
     return null;
   }
 
-  if (!MONGODB_URI || MONGODB_URI.includes("localhost:27017/dummy")) {
-    // If it's the unconfigured default dummy or empty, test with quick timeout
-  }
-
   if (!cached.promise) {
-    const uri = MONGODB_URI || "mongodb://127.0.0.1:27017/ai_marketing_agency";
+    const uri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/ai_marketing_agency";
+    const isTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
     const opts = {
       bufferCommands: false,
-      serverSelectionTimeoutMS: 2500, // 2.5s timeout instead of default 30s
-      connectTimeoutMS: 3000,
+      serverSelectionTimeoutMS: isTest ? 200 : 10000, // 200ms for sub-second test fallbacks, 10s for Atlas
+      connectTimeoutMS: isTest ? 200 : 10000,
+      socketTimeoutMS: 45000,
     };
 
     cached.promise = mongoose
       .connect(uri, opts)
       .then((m) => {
+        cached.conn = m;
         cached.isAvailable = true;
+        cached.lastFailureTime = null;
         return m;
       })
       .catch((err) => {
-        console.warn("[Database] MongoDB connection failed or offline. Operating in Resilient Local Demo Storage Mode.", err.message);
+        console.error("[Database] MongoDB connection failed:", err.message || err);
+        cached.conn = null;
+        cached.promise = null;
         cached.isAvailable = false;
         cached.lastFailureTime = Date.now();
-        cached.promise = null;
+        if (!allowMemoryFallback) {
+          throw new DatabaseConnectionError(`[Database] MongoDB connection failed: ${err.message || err}`, err);
+        }
+        console.warn("[Database] Operating in Resilient Local Demo Storage Mode.");
         return null;
       });
   }
 
   try {
     cached.conn = await cached.promise;
+    cached.isAvailable = true;
+    cached.lastFailureTime = null;
     return cached.conn;
-  } catch {
+  } catch (err: any) {
     cached.promise = null;
     cached.conn = null;
     cached.isAvailable = false;
     cached.lastFailureTime = Date.now();
+    if (!allowMemoryFallback) {
+      if (err instanceof DatabaseConnectionError) {
+        throw err;
+      }
+      throw new DatabaseConnectionError(`[Database] MongoDB connection failed: ${err.message || err}`, err);
+    }
     return null;
   }
 }

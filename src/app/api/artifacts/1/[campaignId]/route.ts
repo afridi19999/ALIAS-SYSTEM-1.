@@ -28,3 +28,26 @@ export async function GET(req: Request, { params }: { params: Promise<{ campaign
     );
   }
 }
+
+export async function PATCH(req: Request, { params }: { params: Promise<{ campaignId: string }> }) {
+  try {
+    const { campaignId: rawId } = await params;
+    const campaignId = rawId ? rawId.replace(/^[./\\]+|[./\\;,:]+$/g, "") : "";
+
+    if (!campaignId) {
+      return NextResponse.json({ error: "Invalid campaign ID" }, { status: 400 });
+    }
+
+    const body = await req.json().catch(() => ({}));
+    const updates = body.updates || body;
+
+    const artifact = await Repository.upsertArtifact1(campaignId, updates, "draft");
+    return NextResponse.json({ success: true, artifact });
+  } catch (error: any) {
+    console.error("[API/Artifact1] Error updating artifact 1:", error);
+    return NextResponse.json(
+      { error: "Failed to update artifact", details: error.message },
+      { status: 500 }
+    );
+  }
+}

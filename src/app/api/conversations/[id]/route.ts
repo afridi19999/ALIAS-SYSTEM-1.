@@ -56,9 +56,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     return NextResponse.json({ success: true, messages, quickReplies });
   } catch (error: any) {
     console.error("[API/Conversations] Error fetching conversation:", error);
+    const status = error.statusCode || (error.name === "DatabaseConnectionError" ? 503 : 500);
     return NextResponse.json(
       { error: "Failed to fetch conversation", details: error.message },
-      { status: 500 }
+      { status }
     );
   }
 }

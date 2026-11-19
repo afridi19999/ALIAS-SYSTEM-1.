@@ -54,6 +54,8 @@ export interface IMasterCampaignBrief extends Document {
     content_direction: string[];
     campaign_direction: string[];
   };
+  masterBriefMarkdown?: string;
+  executionScriptMarkdown?: string;
   sources: any[];
   createdAt: Date;
   updatedAt: Date;
@@ -114,6 +116,8 @@ const MasterCampaignBriefSchema = new Schema(
       content_direction: [{ type: String }],
       campaign_direction: [{ type: String }],
     },
+    masterBriefMarkdown: { type: String, default: "" },
+    executionScriptMarkdown: { type: String, default: "" },
     sources: [{ type: Schema.Types.Mixed }],
   },
   { timestamps: true }

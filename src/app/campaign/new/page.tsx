@@ -26,18 +26,25 @@ export default function NewCampaignPage() {
         let errMsg = `Server responded with status ${res.status}`;
         try {
           const errData = await res.json();
-          if (errData?.error) errMsg = errData.error;
+          if (errData?.details) {
+            errMsg = errData.details;
+          } else if (errData?.error) {
+            errMsg = errData.error;
+          }
         } catch {
           // not json
         }
-        throw new Error(errMsg);
+        setError(errMsg);
+        setIsInitializing(false);
+        return;
       }
 
       const data = await res.json();
       if (data?.campaignId) {
         router.push(`/campaign/${data.campaignId}`);
       } else {
-        throw new Error("No campaignId returned from server");
+        setError("No campaignId returned from server");
+        setIsInitializing(false);
       }
     } catch (err: any) {
       console.error("[NewCampaign] Failed to initialize campaign:", err);

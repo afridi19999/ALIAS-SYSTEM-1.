@@ -55,8 +55,7 @@ export default function AdminCampaignDetail() {
     { title: "Conversation Started", done: (data.messages?.length || 0) > 0, desc: `${data.messages?.length || 0} messages logged` },
     { title: "Artifact-1 Generated", done: Boolean(data.artifact1), desc: "Client facts captured" },
     { title: "Client Confirmed", done: isConfirmed, desc: isConfirmed ? "Confirmed by client" : "Pending client confirmation" },
-    { title: "Research & Enrichment", done: isResearchDone, desc: isResearchDone ? "Artifact-2 generated" : "Pending research execution" },
-    { title: "Master Brief Generated", done: isBriefDone, desc: isBriefDone ? "Downstream strategy ready" : "Awaiting research synthesis" },
+    { title: "Campaign Deliverables Generated", done: isBriefDone || Boolean(campaign?.masterBriefMarkdown), desc: (isBriefDone || Boolean(campaign?.masterBriefMarkdown)) ? "Brief & Execution Script ready" : "Awaiting client confirmation" },
   ];
 
   return (
@@ -92,6 +91,11 @@ export default function AdminCampaignDetail() {
           >
             <Code className="w-3.5 h-3.5 mr-1" /> {showJson ? "Structured View" : "Debug JSON"}
           </Button>
+          <Link href={`/campaign/${campaignId}/brief`}>
+            <Button size="sm" className="text-xs bg-blue-600 hover:bg-blue-700 text-white">
+              <FileText className="w-3.5 h-3.5 mr-1" /> View Deliverables
+            </Button>
+          </Link>
           <Link href={`/campaign/${campaignId}`}>
             <Button variant="outline" size="sm" className="text-xs">
               Open Client View <ExternalLink className="w-3.5 h-3.5 ml-1" />

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -78,6 +79,12 @@ export default function AdminDashboard() {
           <Button variant="outline" size="sm" onClick={loadData} disabled={isLoading}>
             <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${isLoading ? "animate-spin" : ""}`} /> Refresh
           </Button>
+          <Link href="/admin/communication">
+            <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1.5 shadow-xs">
+              <MessageSquare className="w-3.5 h-3.5" />
+              Client Messages
+            </Button>
+          </Link>
         </div>
       </div>
 

@@ -112,9 +112,27 @@ const Artifact1Schema = new Schema(
       videos: [{ type: String }],
       documents: [{ type: String }],
       links: [{ type: String }],
+      readiness: { type: String, default: "" },
     },
+    offers: {
+      primary_offer: { type: String, default: "" },
+      secondary_offer: { type: String, default: "" },
+      status: { type: String, default: "suggested" },
+    },
+    operations: {
+      response_time: { type: String, default: "" },
+      team_size: { type: String, default: "" },
+      auto_reply_needed: { type: Boolean, default: true },
+      delivery_partner: { type: String, default: "" },
+      cod_available: { type: Boolean, default: true },
+      exchange_policy: { type: String, default: "" },
+    },
+    confirmed_facts: { type: Schema.Types.Mixed, default: {} },
+    ai_recommendations: { type: Schema.Types.Mixed, default: {} },
+    assumptions: { type: Schema.Types.Mixed, default: {} },
+    missing_information: [{ type: String }],
   },
-  { timestamps: true }
+  { timestamps: true, strict: false }
 );
 
 export default mongoose.models.Artifact1 || mongoose.model<IArtifact1>("Artifact1", Artifact1Schema);

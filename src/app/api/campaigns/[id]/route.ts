@@ -27,9 +27,10 @@ export async function GET(
     return NextResponse.json({ success: true, campaign });
   } catch (error: any) {
     console.error("[API/Campaigns/[id]] Error fetching campaign:", error);
+    const status = error.statusCode || (error.name === "DatabaseConnectionError" ? 503 : 500);
     return NextResponse.json(
       { error: "Failed to fetch campaign", details: error.message },
-      { status: 500 }
+      { status }
     );
   }
 }

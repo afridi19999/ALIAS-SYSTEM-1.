@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Send, Bot, User, Sparkles, AlertCircle, ArrowRight } from "lucide-react";
 import { DEFAULT_UI_LANG, UI_DEFAULT_QUICK_REPLIES, UI_GREETINGS } from "@/lib/ai/ui-text";
+import { TypingIndicator } from "@/components/chat/TypingIndicator";
+import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 
 interface Message {
   _id?: string;
@@ -29,6 +31,11 @@ export default function ChatInterface({
   const [isLoading, setIsLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [isReadyForConfirmation, setIsReadyForConfirmation] = useState(false);
+  const [engine, setEngine] = useState<"gemini" | "openai" | "demo" | "paused" | null>(null);
+  const [isAiUnavailable, setIsAiUnavailable] = useState(false);
+  const isRemoteTyping = useTypingIndicator(campaignId);
+  const isTypingVisible = isLoading || isRemoteTyping;
+  const lastSentMessageRef = useRef<string>("");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const userJustSentRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -78,6 +85,35 @@ export default function ChatInterface({
     };
   }, [campaignId]);
 
+  // Polling loop to receive incoming admin replies in real time (every 3 seconds)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (isLoading) return;
+      try {
+        const res = await fetch(`/api/conversations/${campaignId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.messages && Array.isArray(data.messages)) {
+          setMessages((prev) => {
+            if (prev.length !== data.messages.length) {
+              return data.messages;
+            }
+            if (prev.length > 0 && data.messages.length > 0) {
+              const lastPrev = prev[prev.length - 1];
+              const lastNew = data.messages[data.messages.length - 1];
+              if (lastPrev.content !== lastNew.content || lastPrev.sender !== lastNew.sender) {
+                return data.messages;
+              }
+            }
+            return prev;
+          });
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [campaignId, isLoading]);
+
   const scrollToBottom = (smooth = true) => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -87,7 +123,7 @@ export default function ChatInterface({
     });
   };
 
-  // Scroll to bottom only when a new message arrives AND user is already near bottom, or when user just sent a message
+  // Scroll to bottom only when a new message arrives AND user is already near bottom, or when user just sent a message, or typing begins
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -95,22 +131,26 @@ export default function ChatInterface({
     const isNearBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight <= 100;
 
-    if (userJustSentRef.current || isNearBottom) {
+    if (userJustSentRef.current || isNearBottom || isTypingVisible) {
       scrollToBottom(true);
       userJustSentRef.current = false;
     }
-  }, [messages, isLoading, isReadyForConfirmation]);
+  }, [messages, isTypingVisible, isReadyForConfirmation]);
 
-  const handleSend = async (customText?: string) => {
+  const handleSend = async (customText?: string, isRetry = false) => {
     const textToSend = (customText || input).trim();
     if (!textToSend || isLoading) return;
 
     userJustSentRef.current = true;
-    const userMsg: Message = { sender: "user", content: textToSend };
-    setMessages((prev) => [...prev, userMsg]);
+    lastSentMessageRef.current = textToSend;
+    if (!isRetry) {
+      const userMsg: Message = { sender: "user", content: textToSend };
+      setMessages((prev) => [...prev, userMsg]);
+    }
     setInput("");
     setIsLoading(true);
     setFetchError(null);
+    setIsAiUnavailable(false);
 
     try {
       const res = await fetch(`/api/conversations/${campaignId}/messages`, {
@@ -121,17 +161,27 @@ export default function ChatInterface({
 
       if (!res.ok) {
         let errMessage = "Server returned an error";
+        let errCode = "";
         try {
           const errData = await res.json();
           if (errData.error) errMessage = errData.error;
+          if (errData.code) errCode = errData.code;
         } catch {
           // not json
         }
-        setFetchError(errMessage);
+        if (errCode === "AI_UNAVAILABLE" || res.status === 503) {
+          setIsAiUnavailable(true);
+        } else {
+          setFetchError(errMessage);
+        }
         return;
       }
 
       const data = await res.json();
+
+      if (data.engine) {
+        setEngine(data.engine);
+      }
 
       // Append AI message and persistent system message
       const newIncoming: Message[] = [];
@@ -163,6 +213,18 @@ export default function ChatInterface({
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+      {engine === "paused" && (
+        <div className="mx-4 mt-2.5 px-3 py-1.5 bg-purple-50 dark:bg-purple-950/60 border border-purple-300 dark:border-purple-800 text-purple-900 dark:text-purple-200 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs shrink-0 animate-in fade-in">
+          <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse shrink-0" />
+          <span>Admin Takeover Active — An agency strategist is managing this conversation</span>
+        </div>
+      )}
+      {engine === "demo" && (
+        <div className="mx-4 mt-2.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs shrink-0 animate-in fade-in">
+          <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+          <span>Demo Mode – AI offline</span>
+        </div>
+      )}
       <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto p-6">
         <div className="flex flex-col gap-5 pb-6">
           {messages.map((msg, idx) => (
@@ -210,20 +272,29 @@ export default function ChatInterface({
             </div>
           ))}
 
-          {isLoading && (
-            <div className="flex items-start gap-3">
-              <div className="w-8 h-8 rounded-full bg-zinc-900 text-white flex items-center justify-center shrink-0">
-                <Bot className="w-4 h-4" />
+          <TypingIndicator isVisible={isTypingVisible} />
+
+          {isAiUnavailable && (
+            <div className="flex items-center justify-between gap-3 p-3.5 text-xs bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-800 rounded-xl">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-amber-600" />
+                <span className="font-medium">
+                  AI এখন উত্তর দিতে পারছে না, একটু পরে আবার চেষ্টা করুন।
+                </span>
               </div>
-              <div className="rounded-2xl px-4 py-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-xs flex items-center gap-1.5 text-zinc-400">
-                <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-pulse"></span>
-                <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-pulse delay-150"></span>
-                <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-pulse delay-300"></span>
-              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => handleSend(lastSentMessageRef.current, true)}
+                disabled={isLoading}
+                className="text-xs h-7 px-3 bg-white dark:bg-zinc-900 border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-900/50 font-semibold cursor-pointer shrink-0"
+              >
+                Retry
+              </Button>
             </div>
           )}
 
-          {fetchError && (
+          {!isAiUnavailable && fetchError && (
             <div className="flex items-center justify-between gap-3 p-3.5 text-xs bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60 rounded-xl">
               <div className="flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />

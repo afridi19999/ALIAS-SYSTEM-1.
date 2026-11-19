@@ -8,6 +8,8 @@ export interface ICampaign extends Document {
   artifact1Id?: mongoose.Types.ObjectId;
   artifact2Id?: mongoose.Types.ObjectId;
   masterBriefId?: mongoose.Types.ObjectId;
+  masterBriefMarkdown?: string;
+  executionScriptMarkdown?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -25,6 +27,8 @@ const CampaignSchema = new Schema(
     artifact1Id: { type: Schema.Types.ObjectId, ref: "Artifact1" },
     artifact2Id: { type: Schema.Types.ObjectId, ref: "Artifact2" },
     masterBriefId: { type: Schema.Types.ObjectId, ref: "MasterCampaignBrief" },
+    masterBriefMarkdown: { type: String, default: "" },
+    executionScriptMarkdown: { type: String, default: "" },
   },
   { timestamps: true }
 );

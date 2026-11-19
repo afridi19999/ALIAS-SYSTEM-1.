@@ -2,8 +2,103 @@ import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import { ConversationTurnSchema } from "@/lib/validation/schemas";
 
+export class AiUnavailableError extends Error {
+  statusCode: number;
+  code: string;
+  constructor(message = "AI service is currently unavailable", cause?: any) {
+    super(message);
+    this.name = "AiUnavailableError";
+    this.statusCode = 503;
+    this.code = "AI_UNAVAILABLE";
+    if (cause) this.cause = cause;
+  }
+}
+
 const USE_OPENAI_FALLBACK = false;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
+
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMsg: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      const err: any = new Error(timeoutMsg);
+      err.status = 503;
+      err.code = "ETIMEDOUT";
+      reject(err);
+    }, ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function isTransientGeminiError(err: any): boolean {
+  if (!err) return false;
+  const status = Number(err.status || err.statusCode || err.code);
+  const msg = String(err.message || "");
+  if (status === 400 || msg.includes("400") || msg.includes("INVALID_ARGUMENT")) {
+    return false;
+  }
+  // If 429 quota is exhausted, retrying the same model will fail; fail fast to candidate fallback
+  if (status === 429 || msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("quota")) {
+    return false;
+  }
+  if (status === 503) {
+    return true;
+  }
+  if (
+    msg.includes("503") ||
+    msg.includes("UNAVAILABLE") ||
+    msg.includes("high demand") ||
+    msg.includes("timed out") ||
+    msg.includes("ETIMEDOUT") ||
+    msg.includes("JSON") ||
+    err instanceof SyntaxError
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function robustParseJson(text: string): any {
+  if (!text) return {};
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  }
+
+  // 1. Isolate the outermost balanced { ... } block to eliminate preambles/postambles
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+
+  // 2. Strip stray markdown bullets inside arrays (e.g., [ * "item" ] or [, - "item"])
+  cleaned = cleaned.replace(/([\[,])\s*[-*•]\s*/g, "$1 ");
+
+  // 3. Clean trailing commas before } or ]
+  cleaned = cleaned.replace(/,\s*([\]}])/g, "$1");
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (initialErr: any) {
+    // 4. Sanitize unescaped newlines and control characters inside strings
+    try {
+      const sanitized = cleaned
+        .replace(/[\u0000-\u001F]+/g, (m) => (m === "\n" ? "\\n" : m === "\r" ? "\\r" : m === "\t" ? "\\t" : ""))
+        .replace(/([\[,])\s*[-*•]\s*/g, "$1 ")
+        .replace(/,\s*([\]}])/g, "$1");
+      return JSON.parse(sanitized);
+    } catch {
+      throw new SyntaxError(`Failed to parse JSON response from LLM: ${initialErr.message}`);
+    }
+  }
+}
 
 function isGeminiConfigured(): boolean {
   const key = process.env.GEMINI_API_KEY;
@@ -785,6 +880,7 @@ function processDemoConversation(
       status: "collecting",
       missing_fields: missing,
       quick_replies: dynamicQuickReplies,
+      engine: "demo" as const,
     };
   }
 
@@ -794,6 +890,7 @@ function processDemoConversation(
     status,
     missing_fields: missing,
     quick_replies: dynamicQuickReplies,
+    engine: "demo" as const,
   };
 }
 
@@ -803,127 +900,234 @@ export const ConversationAgent = {
     history: { sender: string; content: string }[],
     currentArtifact: any
   ) {
-    const systemPrompt = `You are a senior professional AI Marketing Consultant.
-Your mission is to conduct a natural, consultative intake interview to collect campaign requirements.
+    const rawArtifact = currentArtifact?.toObject ? currentArtifact.toObject() : currentArtifact || {};
+    const sanitizedArtifact = {
+      client: rawArtifact.client || {},
+      product_service: rawArtifact.product_service || {},
+      campaign: rawArtifact.campaign || {},
+      target_audience: rawArtifact.target_audience || {},
+      budget: rawArtifact.budget || {},
+      timeline: rawArtifact.timeline || {},
+      brand_preferences: rawArtifact.brand_preferences || {},
+      assets: rawArtifact.assets || {},
+      offers: rawArtifact.offers || {},
+      operations: rawArtifact.operations || {},
+      confirmed_facts: rawArtifact.confirmed_facts || {},
+      ai_recommendations: rawArtifact.ai_recommendations || {},
+    };
 
-CORE PRINCIPLE: "Extract broadly, ask narrowly."
-1. Read the ENTIRE message. Extract every useful client-stated fact.
-2. Update the extracted_updates with ALL extracted facts. Do NOT discard earlier facts.
-3. CLIENT CORRECTIONS:
-   - Explicit client corrections take priority over previously provided values (e.g., "Actually, my budget is 50,000 BDT" or "Change our brand name to X").
-   - When a correction is stated, update extracted_updates with the new corrected value so it replaces the old value.
-   - Only the specifically corrected field must change; all other previously collected, unrelated facts must remain intact.
-   - Do not interpret ordinary discussion or hypothetical mentions as a correction unless the client explicitly indicates an intention to change or correct a fact.
-4. Assign a confidence score (0.0 to 1.0) for every important field extracted.
-   - >= 0.80: Accept as reliable.
-   - 0.50-0.79: Consider clarification if important.
-   - < 0.50: Clarification required.
-5. Do NOT ask for information that is already clearly known (confidence >= 0.80).
-6. Identify the highest-priority missing or uncertain information.
-7. Ask ONE primary question per turn. Do not ask multi-part questions.
-8. Behave like a consultant, not a static form. Follow natural conversation, extract opportunistically.
-9. If the client provides low-confidence info (e.g., "young people"), ask a focused clarification ("Do you mean students, young professionals, or both?").
-10. DYNAMIC QUICK REPLIES: Provide 2-4 short, clickable answer suggestions relevant to your question.
+    const systemPrompt = `You are a senior professional AI Marketing Consultant onboarding a real paying client.
+Your mission is to conduct a natural, consultative intake conversation to discover requirements and prepare a complete campaign execution plan.
 
-STAGE LOGIC (Determine your conversational goal based on missing info):
-- Missing company_name -> 'story'
-- Missing product/service -> 'story'
-- Missing campaign objective -> 'challenge'
-- Missing target audience -> 'customer'
-- Missing budget/timeline -> 'resources'
-- All Tier-1 required fields complete -> 'complete'
-(Tier-1 required: company_name, product_service.name, campaign.objective, target_audience, budget, timeline)
+IMPORTANT: "Phase 1: Conversation AI Only" — Do NOT invent external market statistics, competitor numbers, or advertising benchmarks.
+Ground all analysis on:
+- Facts confirmed by the client.
+- Clearly labeled AI recommendations (requiring client approval).
+- Clearly labeled assumptions.
 
-COMPLETION LOGIC:
-When all Tier-1 fields are sufficiently complete (confidence >= 0.80):
-- Stop asking discovery questions.
-- Generate a concise structured summary of what the client said in 'ai_message'.
-- Ask the client to confirm the information.
-- Set "status" to "ready_for_confirmation".
+CONVERSATION RULES (MANDATORY):
+1. NATURAL HUMAN CONVERSATION: Behave like an experienced marketing agency consultant, not a static form.
+2. ASK ONE MAIN QUESTION AT A TIME: Ask one clear question per turn, wait for response, understand it, then move forward.
+3. EXTRACT BROADLY, ASK NARROWLY: Extract every useful fact from the client's message even if it wasn't what you asked for. NEVER ask again for information already provided.
+4. HANDLE UNKNOWN/UNCERTAIN ANSWERS: If the client is unsure ("I don't know", "You suggest"), provide a reasonable, practical recommendation and explicitly ask for their approval.
+5. HANDLE CORRECTIONS: Explicit client corrections ("Actually our budget is 20k", "Change brand to X") immediately supersede previous values.
+6. SEPARATE FACTS FROM SUGGESTIONS:
+   - Client-Confirmed Facts: What the client explicitly stated or approved.
+   - AI Recommendations: Marketing strategies, offers, budget splits, content ideas suggested by you.
+   - Assumptions: Estimated projections clearly marked as assumptions.
+   - Missing Information: Fields still needed.
+   Discounts, delivery offers, budgets, and policies MUST be treated as AI recommendations until confirmed by the client.
 
-LANGUAGE AND TONE (applies to "ai_message" and "quick_replies" only; JSON keys and extracted values stay as specified):
-- Decide the reply language from the client's latest message that contains real sentence content:
-  * Bangla script -> reply in natural conversational Bangla.
-  * English -> reply in English.
-  * Banglish (Bangla written in English letters) -> reply in Bangla script.
-- If the latest message is only a name, number, brand, or one or two words (e.g. "bd hub", "50000", "Glow Bangladesh"), do NOT switch language. Keep the language of your previous reply.
-- Bangla must be natural and conversational, the way an experienced consultant speaks to a client in Bangladesh. Not literary/sadhu Bangla, and never sentences that read like literal translations from English. Keep common marketing terms in English (campaign, ads, reach, ROI, SEO, target audience, budget). Use "আপনি".
-- English must be plain, warm, professional.
-- Start by briefly acknowledging what the client just said in one short clause, then ask the one question. Never open with praise or filler: no "Great!", "Awesome!", "Certainly!", "অবশ্যই!", "দারুণ!", "চমৎকার!", and never call the client's brand name or idea "great/nice/দারুণ/চমৎকার".
-- ai_message: 1-3 short sentences. Plain text only: no markdown, no asterisks, no bullet symbols.
-- quick_replies: 2-4 options, 1-4 words each, in the same language as ai_message. Every option must be a direct possible ANSWER to the question asked in ai_message (e.g. the question asks about the objective -> options like "অনলাইন সেলস", "ব্র্যান্ড পরিচিতি", "লিড জেনারেশন"). Never generic options like "OK", "ঠিক আছে", "Start now", "Talk later". If the question is open-ended with no sensible short answers (e.g. asking for a brand name), return an empty array [].
-- Examples:
-  client: "amader skincare brand ache, Facebook e sell barate chai" -> ai_message: "বুঝেছি, স্কিনকেয়ার ব্র্যান্ডের জন্য ফেসবুকে সেলস বাড়াতে চান। আপনাদের কোম্পানির নাম কী?", quick_replies: []
-  client: "We sell handmade leather bags and want more orders" -> ai_message: "Got it, handmade leather bags and more orders. What is your brand name?", quick_replies: []
-  client: "bd hub" (after a Bangla conversation) -> stay in Bangla.
+DISCOVERY SPECTRUM (Collect these naturally across the conversation):
+- A. Business & Brand: Name, industry, products/services, operating duration, showroom/online, price range, USP.
+- B. Campaign Objectives: Direct sales/orders priority vs brand awareness, measurable KPIs.
+- C. Target Audience: Age group (e.g. 18-28), gender, locations, professions, lifestyle, core pain point (e.g. fabric quality vs price).
+- D. Offers & Pricing: Product pricing, combo offers, discounts, free delivery (explore as suggestions).
+- E. Budget & Timeline: Monthly ad budget range, campaign duration, launch date, Ads Manager experience level.
+- F. Brand Identity & Creative Direction: Brand tone/personality, visual style (e.g. clean/modern/beige), colors, competitor references.
+- G. Channels & Ad Setup: Paid Meta/Facebook/Instagram, organic short videos (TikTok/Reels), Click-to-Messenger ads (no website/pixel required).
+- H. Operations & Logistics: Inbox response time, team size, auto-reply need, courier delivery (Steadfast/Pathao), COD availability, exchange policy.
+
+COMPLETION & CONFIRMATION LOGIC:
+- DO NOT finish discovery prematurely after collecting only 6 basic fields!
+- Progress through the discovery areas until all core areas (Business, Product, Objective, Audience, Offers, Budget, Brand/Visual, Channels, Operations) are covered.
+- When sufficient discovery is complete:
+  1. Generate a clear structured summary in 'ai_message' dividing items into:
+     - Confirmed Client Facts
+     - AI Recommended Strategy (Offers, Channels, Budget Allocation)
+     - Operational Setup
+  2. Ask the client to review and confirm the summary so final campaign documents can be generated.
+  3. Set "status" to "ready_for_confirmation".
+
+LANGUAGE AND TONE:
+- Match the client's language: Bangla script -> natural conversational Bangla. English -> English. Banglish -> natural conversational Bangla script.
+- Keep English marketing terms in English (campaign, ads, reach, ROI, SEO, budget, target audience, Messenger). Use respectful "আপনি" in Bangla.
+- Never open with empty filler/praise: no "Great!", "Awesome!", "Certainly!", "দারুণ!", "চমৎকার!".
+- Plain text in ai_message: 1-4 short sentences, OR an organized summary when discovery is complete.
+- quick_replies: 2-4 short, clickable answers matching the active question.
 
 Current Extracted Facts (DO NOT lose this data, merge new updates into it):
-${JSON.stringify(currentArtifact, null, 2)}
+${JSON.stringify(sanitizedArtifact, null, 2)}
+
+CRITICAL FORMATTING INSTRUCTION:
+Your response must be ONLY a valid raw JSON object. Never include any conversational preamble, notes, or markdown text outside the JSON object.
 
 Respond with a strictly formatted JSON object:
 {
-  "ai_message": "your natural conversational response. Ask ONE targeted question, OR a confirmation summary if complete.",
+  "ai_message": "your natural conversational response. Ask ONE targeted question, OR provide the confirmation summary if discovery is complete.",
   "extracted_updates": {
-    "client": { "company_name": "", "industry": "", "website": "", "business_description": "" },
-    "product_service": { "name": "", "type": "", "price": null, "description": "" },
-    "campaign": { "name": "", "objective": "", "desired_result": "" },
-    "target_audience": { "age_range": "", "gender": "", "location": "", "description": "" },
+    "client": { "company_name": "", "industry": "", "website": "", "business_description": "", "brand_personality": "", "competitor_references": [], "usp": "", "operating_history": "" },
+    "product_service": { "name": "", "type": "", "price": null, "price_range": "", "description": "", "pain_point_solved": "" },
+    "campaign": { "name": "", "objective": "", "desired_result": "", "theme": "", "ad_structure": "", "channels": { "paid": [], "organic": [] } },
+    "target_audience": { "age_range": "", "gender": "", "location": "", "description": "", "pain_points": "" },
     "budget": { "amount": null, "currency": "BDT", "type": "exact|approximate|range|unknown" },
-    "timeline": { "duration": "" }
+    "timeline": { "duration": "", "start_date": "" },
+    "brand_preferences": { "tone": [], "visual_preference": "", "colors": [] },
+    "assets": { "readiness": "", "images": [], "videos": [] },
+    "offers": { "primary_offer": "", "secondary_offer": "", "status": "suggested|client_approved" },
+    "operations": { "response_time": "", "team_size": "", "auto_reply_needed": true, "delivery_partner": "", "cod_available": true, "exchange_policy": "" },
+    "confirmed_facts": {},
+    "ai_recommendations": {},
+    "assumptions": {},
+    "missing_information": []
   },
   "confidence_scores": {
+    "client.company_name": 0.9,
     "product_service.name": 0.9,
-    "campaign.objective": 0.85,
-    "target_audience.description": 0.4
+    "campaign.objective": 0.85
   },
   "status": "collecting" | "ready_for_confirmation",
   "missing_fields": ["array of still missing or low-confidence fields"],
   "quick_replies": ["option 1", "option 2", "option 3"]
 }`;
 
-    // 1. Google Gemini (Primary)
+    // 1. Google Gemini (Primary with retries on 503/429)
     if (isGeminiConfigured()) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const contents: { role: string; parts: { text: string }[] }[] = [];
+      const activePrimaryModel = process.env.GEMINI_MODEL || GEMINI_MODEL;
+      const activeFallbackModel = process.env.GEMINI_FALLBACK_MODEL || GEMINI_FALLBACK_MODEL;
+      const delays = [1000, 2000];
+      let primaryFailed = false;
 
-        for (const m of history.slice(-10)) {
-          if (m.sender === "system") continue;
-          const role = m.sender === "ai" ? "model" : "user";
-          contents.push({ role, parts: [{ text: m.content }] });
+      const contents: { role: string; parts: { text: string }[] }[] = [];
+
+      // Normalize history to exclude current userMessage if caller included it
+      const priorHistory = [...history];
+      if (
+        priorHistory.length > 0 &&
+        priorHistory[priorHistory.length - 1].sender === "user" &&
+        priorHistory[priorHistory.length - 1].content.trim() === userMessage.trim()
+      ) {
+        priorHistory.pop();
+      }
+
+      for (const m of priorHistory.slice(-10)) {
+        if (m.sender === "system") continue;
+        const role = m.sender === "ai" ? "model" : "user";
+        contents.push({ role, parts: [{ text: m.content }] });
+      }
+      contents.push({ role: "user", parts: [{ text: userMessage }] });
+
+      while (contents.length > 0 && contents[0].role === "model") {
+        contents.shift();
+      }
+
+      for (let attempt = 0; attempt <= 2; attempt++) {
+        try {
+          const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+          const response = await withTimeout(
+            ai.models.generateContent({
+              model: activePrimaryModel,
+              contents,
+              config: {
+                systemInstruction: systemPrompt,
+                responseMimeType: "application/json",
+                temperature: 0.3,
+              },
+            }),
+            18000,
+            `Gemini request to ${activePrimaryModel} timed out after 18s`
+          );
+
+          const raw = response.text || "{}";
+          const parsed = robustParseJson(raw);
+          const validated = ConversationTurnSchema.safeParse(parsed);
+          if (validated.success) {
+            console.log(`[ConversationAgent] Answered with model: ${activePrimaryModel}`);
+            return { ...validated.data, engine: "gemini" as const };
+          } else {
+            console.error(
+              `[ConversationAgent] Provider: Google Gemini, Model: ${activePrimaryModel}, Error: Schema Validation Failed`,
+              validated.error.issues
+            );
+            // Do not retry on schema validation errors
+            primaryFailed = true;
+            break;
+          }
+        } catch (err: any) {
+          console.error(
+            `[ConversationAgent] Provider: Google Gemini, Model: ${activePrimaryModel}, Error:`,
+            err.status || err.statusCode || err.code || "",
+            err.message || err
+          );
+
+          if (isTransientGeminiError(err) && attempt < 2) {
+            const delay = delays[attempt];
+            console.warn(
+              `[ConversationAgent] Transient Gemini error (${err.status || err.statusCode || err.code || 503}). Retrying in ${delay}ms (attempt ${attempt + 1}/2)...`
+            );
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+
+          primaryFailed = true;
+          break;
         }
-        contents.push({ role: "user", parts: [{ text: userMessage }] });
+      }
 
-        while (contents.length > 0 && contents[0].role === "model") {
-          contents.shift();
+      // 2. If still failing, try once with GEMINI_FALLBACK_MODEL
+      if (primaryFailed && activeFallbackModel) {
+        try {
+          console.warn(`[ConversationAgent] Primary model (${activePrimaryModel}) failed. Trying fallback model: ${activeFallbackModel}`);
+          const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+          const response = await withTimeout(
+            ai.models.generateContent({
+              model: activeFallbackModel,
+              contents,
+              config: {
+                systemInstruction: systemPrompt,
+                responseMimeType: "application/json",
+                temperature: 0.3,
+              },
+            }),
+            18000,
+            `Gemini request to fallback model ${activeFallbackModel} timed out after 18s`
+          );
+
+          const raw = response.text || "{}";
+          const parsed = robustParseJson(raw);
+          const validated = ConversationTurnSchema.safeParse(parsed);
+          if (validated.success) {
+            console.log(`[ConversationAgent] Answered with model: ${activeFallbackModel}`);
+            return { ...validated.data, engine: "gemini" as const };
+          } else {
+            console.error(
+              `[ConversationAgent] Provider: Google Gemini (Fallback), Model: ${activeFallbackModel}, Error: Schema Validation Failed`,
+              validated.error.issues
+            );
+          }
+        } catch (err: any) {
+          console.error(
+            `[ConversationAgent] Provider: Google Gemini (Fallback), Model: ${activeFallbackModel}, Error:`,
+            err.status || err.statusCode || err.code || "",
+            err.message || err
+          );
         }
-
-        const response = await ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents,
-          config: {
-            systemInstruction: systemPrompt,
-            responseMimeType: "application/json",
-            temperature: 0.3,
-          },
-        });
-
-        const raw = response.text || "{}";
-        const parsed = JSON.parse(raw);
-        const validated = ConversationTurnSchema.safeParse(parsed);
-        if (validated.success) {
-          return validated.data;
-        } else {
-          console.warn("[ConversationAgent] Gemini validation failed:", validated.error.issues, "Raw string:", raw);
-        }
-      } catch (err: any) {
-        console.warn("[ConversationAgent] Gemini API call failed:", err.message);
       }
     } else {
       console.warn("[ConversationAgent] GEMINI_API_KEY not set, using demo engine");
     }
 
-    // 2. OpenAI Fallback (optional)
+    // 3. OpenAI Fallback (optional)
     if (USE_OPENAI_FALLBACK && isOpenAiConfigured()) {
       try {
         const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -947,16 +1151,27 @@ Respond with a strictly formatted JSON object:
         // Validate output with Zod
         const validated = ConversationTurnSchema.safeParse(parsed);
         if (validated.success) {
-          return validated.data;
+          return { ...validated.data, engine: "openai" as const };
         } else {
-          console.warn("[ConversationAgent] Validation failed:", validated.error.issues, "Raw string:", raw);
+          console.error(
+            `[ConversationAgent] Provider: OpenAI, Model: gpt-4o-mini, Error: Schema Validation Failed`,
+            validated.error.issues
+          );
         }
       } catch (err: any) {
-        console.warn("[ConversationAgent] OpenAI API call failed, activating Demo Consultant Engine:", err.message);
+        console.error(
+          `[ConversationAgent] Provider: OpenAI, Model: gpt-4o-mini, Error:`,
+          err.status || err.statusCode || err.code || "",
+          err.message || err
+        );
       }
     }
 
+    if (process.env.ALLOW_DEMO_FALLBACK === "false") {
+      throw new AiUnavailableError("[ConversationAgent] AI generation failed and ALLOW_DEMO_FALLBACK is set to 'false'.");
+    }
+
     // Demo Mode Engine
-    return processDemoConversation(userMessage, history, currentArtifact);
+    return { ...processDemoConversation(userMessage, history, currentArtifact), engine: "demo" as const };
   },
 };
