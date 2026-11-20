@@ -26,6 +26,8 @@ export interface IAdminClientThread extends Document {
   pendingAiJobId?: mongoose.Types.ObjectId | null;
   /** When the pending AI generation will start (for countdown display) */
   aiJobScheduledStartAt?: Date | null;
+  /** Thread classification: intake (campaign onboarding) vs direct (general communication) */
+  threadType?: "intake" | "direct";
   status: "active" | "archived";
   createdAt: Date;
   updatedAt: Date;
@@ -54,6 +56,7 @@ const AdminClientThreadSchema = new Schema(
     lastClientMessageAt: { type: Date },
     pendingAiJobId: { type: Schema.Types.ObjectId, ref: "AdminAiGenerationJob", default: null },
     aiJobScheduledStartAt: { type: Date, default: null },
+    threadType: { type: String, enum: ["intake", "direct"], default: "intake" },
     status: { type: String, enum: ["active", "archived"], default: "active" },
   },
   { timestamps: true }

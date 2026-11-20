@@ -130,21 +130,37 @@ export class DurableCommunicationWorker {
       }
     );
 
-    // 3. Reset recoverable auto-reply jobs
-    await AdminAutoReplyJob.updateMany(
-      {
-        status: "PROCESSING",
-        lockedAt: { $lte: staleThreshold },
-      },
-      {
-        $set: {
-          status: "PENDING",
-          lockedAt: null,
-          lockedBy: null,
-          claimToken: null,
-        },
+    // 3. Reset recoverable auto-reply jobs (cancelling any that belong to intake threads)
+    const staleAutoReplyJobs = await AdminAutoReplyJob.find({
+      status: "PROCESSING",
+      lockedAt: { $lte: staleThreshold },
+    }).lean();
+
+    if (staleAutoReplyJobs.length > 0) {
+      const { ThreadService } = await import("@/lib/communication/thread-service");
+      for (const job of staleAutoReplyJobs) {
+        const thread = await AdminClientThread.findById(job.threadId).lean();
+        const isIntake = await ThreadService.isIntakeThread(thread);
+        if (isIntake) {
+          await AdminAutoReplyJob.findByIdAndUpdate(job._id, {
+            $set: {
+              status: "CANCELLED",
+              cancelledReason: "INTAKE_THREAD_EXCLUDED",
+              completedAt: new Date(),
+            },
+          });
+        } else {
+          await AdminAutoReplyJob.findByIdAndUpdate(job._id, {
+            $set: {
+              status: "PENDING",
+              lockedAt: null,
+              lockedBy: null,
+              claimToken: null,
+            },
+          });
+        }
       }
-    );
+    }
   }
 
   /**
@@ -381,9 +397,31 @@ export class DurableCommunicationWorker {
           settings = created;
         }
 
+        // Check thread type: intake threads are strictly excluded from auto-reply scheduling
+        const { ThreadService } = await import("@/lib/communication/thread-service");
+        const isIntake = await ThreadService.isIntakeThread(currentThread);
+
+        // Check real identity vs placeholder values to prevent leaking placeholders
+        const isPlaceholderClient =
+          !currentThread.clientName ||
+          currentThread.clientName.trim().length === 0 ||
+          currentThread.clientName.trim().toLowerCase() === "demo client" ||
+          currentThread.clientName.trim().toLowerCase() === "client";
+
+        const isPlaceholderCampaign =
+          !currentThread.businessName ||
+          currentThread.businessName.trim().length === 0 ||
+          currentThread.businessName.trim().toLowerCase() === "new marketing campaign" ||
+          currentThread.businessName.trim().toLowerCase() === "untitled campaign" ||
+          currentThread.businessName.trim().toLowerCase() === "client campaign";
+
+        const hasRealIdentity = !isPlaceholderClient && !isPlaceholderCampaign;
+
         // Eligibility criteria for scheduling autonomous auto-reply:
-        // Must be explicitly enabled globally AND mode must be ADMIN_AWAY AND thread not admin controlled
+        // Must NOT be an intake thread AND have real identity AND auto-reply enabled globally AND mode must be ADMIN_AWAY AND thread not admin controlled
         const isEligible =
+          !isIntake &&
+          hasRealIdentity &&
           settings.autoReplyGlobalEnabled === true &&
           currentCommState.effectiveMode === "ADMIN_AWAY" &&
           !currentThread.adminControlled &&
@@ -559,8 +597,25 @@ export class DurableCommunicationWorker {
           return false;
         }
 
-        // 1b. Check if thread was taken over by Admin
+        // 1b. Check if thread is intake or taken over by Admin
         const currentThreadCheck = await AdminClientThread.findById(job.threadId, null, sessionOpt);
+        const { ThreadService } = await import("@/lib/communication/thread-service");
+        const isIntakeDispatch = await ThreadService.isIntakeThread(currentThreadCheck);
+        if (isIntakeDispatch) {
+          await AdminAutoReplyJob.findOneAndUpdate(
+            { _id: job._id, status: "PROCESSING", claimToken },
+            {
+              $set: {
+                status: "CANCELLED",
+                cancelledReason: "INTAKE_THREAD_EXCLUDED",
+                completedAt: new Date(),
+              },
+            },
+            sessionOpt
+          );
+          return false;
+        }
+
         if (currentThreadCheck?.adminControlled || currentThreadCheck?.aiAutoReplyAllowed === false) {
           await AdminAutoReplyJob.findOneAndUpdate(
             { _id: job._id, status: "PROCESSING", claimToken },
@@ -662,7 +717,9 @@ export class DurableCommunicationWorker {
         );
 
         // 5b. Mirror outgoing auto-reply to client intake chat (Message model)
-        if (updatedThread.campaignId && mongoose.connection.readyState === 1) {
+        // ONLY mirror if the thread is NOT an intake thread (intake threads have their own dedicated intake bot)
+        const isIntakeMirror = await ThreadService.isIntakeThread(updatedThread);
+        if (!isIntakeMirror && updatedThread.campaignId && mongoose.connection.readyState === 1) {
           try {
             const MessageModel = mongoose.models.Message || (await import("@/models/Message")).default;
             const ConversationModel = mongoose.models.Conversation || (await import("@/models/Conversation")).default;

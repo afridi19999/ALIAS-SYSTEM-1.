@@ -67,6 +67,34 @@ export async function runCommunicationTransaction<T>(
 
 export class ThreadService {
   /**
+   * Determine whether a thread is an intake thread.
+   * Checks explicit threadType first, then safely inspects campaign/conversation relationships for legacy records.
+   */
+  static async isIntakeThread(thread: IAdminClientThread | any): Promise<boolean> {
+    if (!thread) return false;
+    if (thread.threadType === "intake") return true;
+    if (thread.threadType === "direct") return false;
+
+    // Legacy thread check: examine campaign and intake conversation relationships
+    try {
+      if (thread.campaignId) {
+        const ConversationModel = mongoose.models.Conversation || (await import("@/models/Conversation")).default;
+        const MessageModel = mongoose.models.Message || (await import("@/models/Message")).default;
+        const [convExists, msgCount] = await Promise.all([
+          ConversationModel.exists({ campaignId: thread.campaignId }),
+          MessageModel.countDocuments({ campaignId: thread.campaignId }),
+        ]);
+        if (convExists || msgCount > 0) {
+          return true;
+        }
+      }
+    } catch (err) {
+      console.warn("[ThreadService.isIntakeThread] Error resolving legacy thread type:", err);
+    }
+    return false;
+  }
+
+  /**
    * Find or initialize a communication thread between client and agency admin.
    * Handles duplicate key race conditions (Mongo E11000) gracefully.
    */
@@ -76,6 +104,7 @@ export class ThreadService {
     clientName?: string;
     clientEmail?: string;
     businessName?: string;
+    threadType?: "intake" | "direct";
   }): Promise<IAdminClientThread> {
     await dbConnect();
     const campaignIdObj = new mongoose.Types.ObjectId(params.campaignId.toString());
@@ -89,6 +118,14 @@ export class ThreadService {
 
     if (thread) {
       let needsSave = false;
+      if (params.threadType && thread.threadType !== params.threadType) {
+        thread.threadType = params.threadType;
+        needsSave = true;
+      } else if (!thread.threadType) {
+        const resolvedType = (await this.isIntakeThread(thread)) ? "intake" : "direct";
+        thread.threadType = resolvedType;
+        needsSave = true;
+      }
       if (params.clientName && thread.clientName !== params.clientName) {
         thread.clientName = params.clientName;
         needsSave = true;
@@ -115,6 +152,7 @@ export class ThreadService {
         clientName: params.clientName || "",
         clientEmail: params.clientEmail || "",
         businessName: params.businessName || "",
+        threadType: params.threadType || "intake",
         threadGeneration: 1,
         unreadAdminCount: 0,
         unreadClientCount: 0,
@@ -147,11 +185,13 @@ export class ThreadService {
     clientName: string;
     content: string;
     idempotencyKey?: string;
+    threadType?: "intake" | "direct";
   }): Promise<{ message: IAdminClientMessage; thread: IAdminClientThread }> {
     const thread = await this.findOrCreateThread({
       campaignId: params.campaignId,
       clientId: params.clientId,
       clientName: params.clientName,
+      threadType: params.threadType || "direct",
     });
 
     return await runCommunicationTransaction(async (session) => {
@@ -548,6 +588,7 @@ export class ThreadService {
       clientName,
       clientEmail,
       businessName,
+      threadType: "intake",
     });
 
     const MessageModel = mongoose.models.Message || (await import("@/models/Message")).default;

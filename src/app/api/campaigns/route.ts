@@ -28,6 +28,7 @@ export async function POST(req: Request) {
         clientName: client.name || "Demo Client",
         clientEmail: client.email || "client@example.com",
         businessName: name,
+        threadType: "intake",
       });
     } catch (tErr) {
       console.warn("[API/Campaigns] Non-blocking thread init warning:", tErr);
