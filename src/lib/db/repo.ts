@@ -1,4 +1,4 @@
-import dbConnect, { isMongoConnected, DatabaseConnectionError } from "@/lib/db/connect";
+import dbConnect, { isMongoConnected, DatabaseConnectionError, getLastDatabaseError } from "@/lib/db/connect";
 import User, { IUser } from "@/models/User";
 import Campaign, { ICampaign } from "@/models/Campaign";
 import Conversation, { IConversation } from "@/models/Conversation";
@@ -9,8 +9,10 @@ import MasterCampaignBrief, { IMasterCampaignBrief } from "@/models/MasterCampai
 
 function assertMemoryFallbackAllowed(operation: string) {
   if (process.env.ALLOW_MEMORY_FALLBACK === "false") {
+    const lastErr = getLastDatabaseError();
+    const reasonMsg = lastErr?.message ? ` (Underlying cause: ${lastErr.message})` : "";
     throw new DatabaseConnectionError(
-      `[Repository] Database unavailable for ${operation} and ALLOW_MEMORY_FALLBACK is 'false'.`
+      `[Repository] Database unavailable for ${operation} and ALLOW_MEMORY_FALLBACK is 'false'.${reasonMsg}`
     );
   }
 }

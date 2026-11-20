@@ -15,6 +15,7 @@ interface MongooseCache {
   promise: Promise<typeof mongoose | null> | null;
   isAvailable: boolean | null;
   lastFailureTime: number | null;
+  lastError: Error | null;
 }
 
 declare global {
@@ -27,6 +28,7 @@ const cached: MongooseCache = global.mongooseCache || {
   promise: null,
   isAvailable: null,
   lastFailureTime: null,
+  lastError: null,
 };
 
 if (!global.mongooseCache) {
@@ -98,6 +100,7 @@ export async function dbConnect(): Promise<typeof mongoose | null> {
         cached.promise = null;
         cached.isAvailable = false;
         cached.lastFailureTime = Date.now();
+        cached.lastError = err instanceof Error ? err : new Error(String(err));
         if (!allowMemoryFallback) {
           throw new DatabaseConnectionError(`[Database] MongoDB connection failed: ${err.message || err}`, err);
         }
@@ -110,12 +113,14 @@ export async function dbConnect(): Promise<typeof mongoose | null> {
     cached.conn = await cached.promise;
     cached.isAvailable = true;
     cached.lastFailureTime = null;
+    cached.lastError = null;
     return cached.conn;
   } catch (err: any) {
     cached.promise = null;
     cached.conn = null;
     cached.isAvailable = false;
     cached.lastFailureTime = Date.now();
+    cached.lastError = err instanceof Error ? err : new Error(String(err));
     if (!allowMemoryFallback) {
       if (err instanceof DatabaseConnectionError) {
         throw err;
@@ -124,6 +129,10 @@ export async function dbConnect(): Promise<typeof mongoose | null> {
     }
     return null;
   }
+}
+
+export function getLastDatabaseError(): Error | null {
+  return cached.lastError;
 }
 
 export function isMongoConnected(): boolean {
