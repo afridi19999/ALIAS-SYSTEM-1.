@@ -187,12 +187,12 @@ describe("Intake Duplicate AI Response Prevention & Exclusion Suite", () => {
       scheduledExecuteAt: new Date(Date.now() - 1000),
     };
 
-    vi.spyOn(AdminAutoReplyJob, "findOneAndUpdate").mockImplementation((query: any, update: any) => {
+    vi.spyOn(AdminAutoReplyJob, "findOneAndUpdate").mockImplementation(((query: any, update: any) => {
       if (query._id && update?.$set?.status === "PROCESSING") {
         return Promise.resolve(jobDoc);
       }
       return Promise.resolve(jobDoc);
-    });
+    }) as any);
 
     vi.spyOn(AdminClientThread, "findById").mockResolvedValue(threadDoc);
     vi.spyOn(PresenceService, "getState").mockResolvedValue({
