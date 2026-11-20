@@ -176,7 +176,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const updatedArtifact = await Repository.upsertArtifact1(
       campaignId,
       agentResult.extracted_updates,
-      "draft"
+      undefined,
+      { source: "client_stated" }
     );
 
     // 5b. Auto-rename campaign as soon as a brand name is confirmed or changed
@@ -205,6 +206,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     let systemMessage = null;
     if (agentResult.status === "ready_for_confirmation") {
       await Repository.updateCampaignStatus(campaignId, "ready_for_confirmation");
+      await Repository.upsertArtifact1(campaignId, {}, "READY_FOR_REVIEW", { source: "client_stated" });
       systemMessage = await Repository.createMessage({
         conversationId,
         campaignId,

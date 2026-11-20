@@ -17,7 +17,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ campaign
 
     let artifact = await Repository.getArtifact1(campaignId);
     if (!artifact) {
-      artifact = await Repository.upsertArtifact1(campaignId, {}, "draft");
+      artifact = await Repository.upsertArtifact1(campaignId, {}, "DRAFT");
     }
     return NextResponse.json({ success: true, artifact });
   } catch (error: any) {
@@ -40,8 +40,16 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ campai
 
     const body = await req.json().catch(() => ({}));
     const updates = body.updates || body;
+    const source = body.source || "admin_provided";
+    const status = body.status;
+    const reason = body.reason || "Admin edit";
+    const modifiedBy = body.modifiedBy || "admin";
 
-    const artifact = await Repository.upsertArtifact1(campaignId, updates, "draft");
+    const artifact = await Repository.upsertArtifact1(campaignId, updates, status, {
+      source,
+      reason,
+      modifiedBy,
+    });
     return NextResponse.json({ success: true, artifact });
   } catch (error: any) {
     console.error("[API/Artifact1] Error updating artifact 1:", error);

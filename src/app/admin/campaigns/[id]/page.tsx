@@ -25,6 +25,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import Link from "next/link";
+import Artifact1ReviewView from "@/components/admin/Artifact1ReviewView";
 
 export default function AdminCampaignDetail() {
   const params = useParams();
@@ -222,40 +223,16 @@ export default function AdminCampaignDetail() {
 
           {/* TAB 3: ARTIFACT 1 */}
           {tab === "artifact-1" && (
-            <Card className="p-6 bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-xs">
-              <div className="flex items-center justify-between mb-4 border-b border-zinc-100 dark:border-zinc-800 pb-3">
-                <div className="flex items-center gap-2">
-                  <h3 className="font-semibold text-zinc-900 dark:text-zinc-100">
-                    Artifact-1: Client-Stated Facts
-                  </h3>
-                  <span className="px-2 py-0.5 rounded text-xs uppercase font-medium bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">
-                    Status: {data.artifact1?.status || "draft"}
-                  </span>
-                </div>
-              </div>
-              {data.artifact1 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                  <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-800/40 border border-zinc-200/80 dark:border-zinc-800">
-                    <span className="text-xs font-semibold text-zinc-500 uppercase">Business & Offering</span>
-                    <p className="mt-1 font-medium">Company: {data.artifact1.client?.company_name || "—"}</p>
-                    <p className="text-xs text-zinc-500">Industry: {data.artifact1.client?.industry || "—"}</p>
-                    <p className="text-xs text-zinc-500">Website: {data.artifact1.client?.website || "—"}</p>
-                    <p className="mt-2 text-xs font-medium">Product: {data.artifact1.product_service?.name || "—"}</p>
-                    <p className="text-xs text-zinc-500">Price: {data.artifact1.product_service?.price ? `BDT ${data.artifact1.product_service.price}` : "—"}</p>
-                  </div>
-
-                  <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-800/40 border border-zinc-200/80 dark:border-zinc-800">
-                    <span className="text-xs font-semibold text-zinc-500 uppercase">Strategy, Audience & Budget</span>
-                    <p className="mt-1 font-medium">Objective: {data.artifact1.campaign?.objective || "—"}</p>
-                    <p className="text-xs text-zinc-500">Audience: {data.artifact1.target_audience?.age_range || "—"} ({data.artifact1.target_audience?.location || "—"})</p>
-                    <p className="text-xs text-zinc-500">Budget: {data.artifact1.budget?.amount ? `${data.artifact1.budget.amount} ${data.artifact1.budget.currency}` : data.artifact1.budget?.type || "unknown"}</p>
-                    <p className="text-xs text-zinc-500">Timeline: {data.artifact1.timeline?.duration || "—"}</p>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-zinc-400 py-6 text-center">Artifact-1 has not been instantiated yet.</p>
-              )}
-            </Card>
+            <div className="flex flex-col gap-4">
+              <Artifact1ReviewView
+                artifact={data.artifact1}
+                campaignId={campaignId}
+                isAdmin={true}
+                onArtifactUpdate={(updated) => {
+                  setData((prev: any) => ({ ...prev, artifact1: updated }));
+                }}
+              />
+            </div>
           )}
 
           {/* TAB 4: ARTIFACT 2 */}
