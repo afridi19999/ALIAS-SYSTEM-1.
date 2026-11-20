@@ -382,10 +382,10 @@ export class DurableCommunicationWorker {
         }
 
         // Eligibility criteria for scheduling autonomous auto-reply:
-        // Must be explicitly enabled globally AND messaging not shut off AND thread not admin controlled
+        // Must be explicitly enabled globally AND mode must be ADMIN_AWAY AND thread not admin controlled
         const isEligible =
           settings.autoReplyGlobalEnabled === true &&
-          currentCommState.effectiveMode !== "MESSAGING_OFF" &&
+          currentCommState.effectiveMode === "ADMIN_AWAY" &&
           !currentThread.adminControlled &&
           currentThread.aiAutoReplyAllowed !== false &&
           currentThread.perThreadAiEnabled !== false &&
@@ -536,12 +536,12 @@ export class DurableCommunicationWorker {
       const dispatched = await runCommunicationTransaction(async (session) => {
         const sessionOpt = { session };
 
-        // 1. Verify Global Communication Mode: Must NOT be MESSAGING_OFF and auto-reply must be enabled
+        // 1. Verify Global Communication Mode: Must be ADMIN_AWAY to dispatch!
         const { PresenceService } = await import("@/lib/communication/presence-service");
         const freshState = await PresenceService.getState();
 
-        if (freshState.effectiveMode === "MESSAGING_OFF" || !freshState.settings.autoReplyGlobalEnabled) {
-          // Fenced out by Messaging Off or Master Auto-Reply Disabled
+        if (freshState.effectiveMode !== "ADMIN_AWAY") {
+          // Fenced out by Admin presence or Messaging Off
           await AdminAutoReplyJob.findOneAndUpdate(
             { _id: job._id, status: "PROCESSING", claimToken },
             {
@@ -550,7 +550,7 @@ export class DurableCommunicationWorker {
                 cancelledReason:
                   freshState.effectiveMode === "MESSAGING_OFF"
                     ? "MESSAGING_OFF_MODE_ACTIVATED"
-                    : "AUTO_REPLY_DISABLED_PREVENTS_DISPATCH",
+                    : "ADMIN_ACTIVE_PREVENTS_AUTO_REPLY",
                 completedAt: new Date(),
               },
             },
@@ -808,73 +808,6 @@ export class DurableCommunicationWorker {
 
     if (dueReplyJob) {
       await this.processAutoReplyJob(dueReplyJob._id as mongoose.Types.ObjectId, workerId);
-    }
-
-    // Auto-Reply Recovery Check:
-    // If thread is AI-controlled, Auto-Reply is enabled, and the latest client message completed AI analysis
-    // without an active auto-reply job, schedule the 10-second takeover window!
-    const activeAutoReplyJob = await AdminAutoReplyJob.findOne({
-      threadId: threadIdObj,
-      status: "PENDING",
-    });
-
-    if (!activeAutoReplyJob && !pendingAiJob) {
-      const thread = await AdminClientThread.findById(threadIdObj);
-      if (
-        thread &&
-        !thread.adminControlled &&
-        thread.perThreadAiEnabled !== false &&
-        thread.aiAutoReplyAllowed !== false &&
-        thread.lastSender === "client"
-      ) {
-        const { PresenceService } = await import("@/lib/communication/presence-service");
-        const freshState = await PresenceService.getState();
-        if (
-          freshState.settings.autoReplyGlobalEnabled &&
-          freshState.effectiveMode !== "MESSAGING_OFF"
-        ) {
-          const lastMsg = await AdminClientMessage.findOne({
-            threadId: threadIdObj,
-            sender: "client",
-          }).sort({ createdAt: -1 });
-
-          if (
-            lastMsg &&
-            lastMsg.aiStatus === "COMPLETED" &&
-            lastMsg.autoReplyStatus === "NOT_SCHEDULED" &&
-            lastMsg.aiAnalysis?.suggestions
-          ) {
-            const tone = (freshState.settings.defaultTone || lastMsg.aiAnalysis.recommendedTone || "professional") as "professional" | "friendly" | "detailed";
-            const proposedReply = lastMsg.aiAnalysis.suggestions[tone] || lastMsg.aiAnalysis.suggestions.professional;
-
-            if (proposedReply) {
-              const countdownSec = freshState.settings.countdownDurationSeconds || 10;
-              const scheduledExecuteAt = new Date(Date.now() + countdownSec * 1000);
-
-              const [autoJob] = await AdminAutoReplyJob.create([
-                {
-                  threadId: thread._id,
-                  threadGeneration: thread.threadGeneration,
-                  settingsRevision: freshState.settings.settingsRevision || 1,
-                  messageId: lastMsg._id,
-                  idempotencyKey: `auto_${lastMsg._id.toString()}_${thread.threadGeneration}`,
-                  scheduledExecuteAt,
-                  proposedReply,
-                  tone,
-                  status: "PENDING",
-                },
-              ]);
-
-              thread.activeJobId = autoJob._id;
-              await thread.save();
-
-              await AdminClientMessage.findByIdAndUpdate(lastMsg._id, {
-                $set: { autoReplyStatus: "PENDING" },
-              });
-            }
-          }
-        }
-      }
     }
   }
 }
